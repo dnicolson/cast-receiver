@@ -26,6 +26,7 @@ var version = "dev" // overridden by goreleaser
 func main() {
 	port := flag.Int("port", 8009, "TLS listen port")
 	name := flag.String("name", "Go Cast Receiver", "friendly device name")
+	dashPort := flag.Int("dashboard", 0, "web dashboard port (0 = disabled)")
 	flag.Parse()
 
 	certFile := "cert.pem"
@@ -59,6 +60,15 @@ func main() {
 
 	// Create shared receiver for multi-sender support.
 	receiver := cast.NewReceiver(authenticator)
+
+	// Optional web dashboard.
+	if *dashPort > 0 {
+		stopDash, err := cast.StartDashboard(receiver, *dashPort)
+		if err != nil {
+			log.Fatalf("dashboard: %v", err)
+		}
+		defer stopDash()
+	}
 
 	// mDNS advertisement
 	// ponytail: single static TXT record; add full Cast TXT fields (model, capabilities) if senders can't find us

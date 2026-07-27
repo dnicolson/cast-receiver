@@ -212,15 +212,20 @@ func handleStop(r *Receiver, src string, req *mediaRequest) {
 
 func sendMediaStatus(r *Receiver, src string, reqID int) {
 	r.Media.mu.Lock()
-	status := *r.Media
+	sid := r.Media.SessionID
+	ps := r.Media.PlayerState
+	ir := r.Media.IdleReason
+	media := r.Media.Media
+	vol := r.Media.Volume
 	r.Media.mu.Unlock()
 
 	msg := mediaStatusMsg{
 		Type:      "MEDIA_STATUS",
 		RequestID: reqID,
-		Status:    []*MediaSession{&status},
+		Status: []*MediaSession{
+			{SessionID: sid, PlayerState: ps, IdleReason: ir, Media: media, Volume: vol},
+		},
 	}
 	b, _ := json.Marshal(msg)
-	// Send to the requesting sender + broadcast to all others
 	r.Broadcast(src, nsMedia, json.RawMessage(b))
 }

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #111; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+.card { background: #1a1a2e; border-radius: 16px; padding: 32px; width: 380px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+h1 { font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #fff; }
+.row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #2a2a3e; }
+.row:last-child { border-bottom: none; }
+.label { color: #888; }
+.value { color: #fff; font-weight: 500; }
+.state-idle { color: #666; }
+.state-playing { color: #4ade80; }
+.state-paused { color: #fbbf24; }
+.state-buffering { color: #60a5fa; }
+.vol-bar { height: 6px; background: #2a2a3e; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+.vol-fill { height: 100%; background: #4ade80; border-radius: 3px; transition: width 0.3s; }
+.controls { display: flex; gap: 12px; margin-top: 16px; justify-content: center; }
+.controls button { background: #2a2a3e; border: none; color: #fff; font-size: 18px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; }
+.controls button:hover { background: #3a3a5e; }
+.controls button:active { background: #4a4a6e; }
+.nowplaying { margin-top: 12px; padding: 10px; background: #16213e; border-radius: 8px; font-size: 13px; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>📺 Cast Receiver</h1>
+  <div class="row"><span class="label">State</span><span class="value" id="state">—</span></div>
+  <div class="row"><span class="label">Volume</span><span class="value" id="volume">—</span></div>
+  <div class="vol-bar"><div class="vol-fill" id="volFill" style="width:100%"></div></div>
+  <div class="row"><span class="label">Sessions</span><span class="value" id="sessions">0</span></div>
+  <div class="nowplaying" id="nowplaying">No media loaded</div>
+  <div class="controls">
+    <button id="btnPlay" title="Play">▶</button>
+    <button id="btnPause" title="Pause">⏸</button>
+    <button id="btnStop" title="Stop">⏹</button>
+  </div>
+</div>
+<script>
+const stateEl = document.getElementById('state');
+const volEl = document.getElementById('volume');
+const volFill = document.getElementById('volFill');
+const sesEl = document.getElementById('sessions');
+const npEl = document.getElementById('nowplaying');
+
+function update() {
+  fetch('/api/status').then(r => r.json()).then(d => {
+    stateEl.textContent = d.playerState;
+    stateEl.className = 'value state-' + d.playerState.toLowerCase();
+    volEl.textContent = Math.round(d.volume * 100) + '%';
+    volFill.style.width = (d.volume * 100) + '%';
+    sesEl.textContent = d.sessions;
+    if (d.contentId) {
+      npEl.innerHTML = '<b>' + (d.title || 'Untitled') + '</b><br>' + d.contentId + '<br>' + d.contentType;
+    } else {
+      npEl.textContent = 'No media loaded';
+    }
+  }).catch(() => {});
+}
+setInterval(update, 2000);
+update();
+
+document.getElementById('btnPlay').onclick = () => fetch('/api/play', {method:'POST'});
+document.getElementById('btnPause').onclick = () => fetch('/api/pause', {method:'POST'});
+document.getElementById('btnStop').onclick = () => fetch('/api/stop', {method:'POST'});
+</script>
+</body>
+</html>
