@@ -45,6 +45,21 @@ func main() {
 		log.Fatalf("load cert: %v", err)
 	}
 
+	// Extract DER bytes of the TLS cert for device auth signing.
+	// ponytail: uses first cert in the chain; add full chain handling if needed
+	tlsCertDER := cert.Certificate[0]
+
+	// Create Cast device authenticator.
+	authenticator, err := cast.NewAuthenticator(tlsCertDER)
+	if err != nil {
+		log.Fatalf("auth init: %v", err)
+	} else {
+		log.Println("device authenticator ready")
+	}
+
+	// Create shared receiver for multi-sender support.
+	receiver := cast.NewReceiver(authenticator)
+
 	// mDNS advertisement
 	// ponytail: single static TXT record; add full Cast TXT fields (model, capabilities) if senders can't find us
 	service, err := mdns.NewMDNSService(
@@ -97,7 +112,7 @@ func main() {
 		}
 		tlsConn := conn.(*tls.Conn)
 		// ponytail: sequential handling; add goroutine per conn if multiple senders need simultaneous support
-		go cast.HandleSession(tlsConn, *name)
+		go cast.HandleConnection(tlsConn, receiver)
 	}
 }
 

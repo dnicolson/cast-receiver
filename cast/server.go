@@ -20,11 +20,11 @@ const (
 
 // Session holds state for one connected Cast sender.
 type Session struct {
-	conn  *tls.Conn
-	mu    sync.Mutex
-	media *nsMediaHandler
-
-	apps []AppStatus
+	conn     *tls.Conn
+	mu       sync.Mutex
+	receiver *Receiver
+	sourceID string
+	apps     []AppStatus
 }
 
 type AppStatus struct {
@@ -36,10 +36,11 @@ type AppStatus struct {
 	TransportID string   `json:"transportId"`
 }
 
-// HandleSession manages the full lifecycle of one TLS connection.
-func HandleSession(conn *tls.Conn, friendlyName string) {
+// HandleConnection manages the full lifecycle of one TLS connection.
+func HandleConnection(conn *tls.Conn, receiver *Receiver) {
 	s := &Session{
-		conn: conn,
+		conn:     conn,
+		receiver: receiver,
 		apps: []AppStatus{{
 			AppID:       "CC1AD845",
 			DisplayName: "Default Media Receiver",
@@ -49,17 +50,18 @@ func HandleSession(conn *tls.Conn, friendlyName string) {
 			TransportID: "web-1",
 		}},
 	}
-	s.media = newMediaHandler(func(dest string, payload json.RawMessage) {
-		s.send(dest, nsMedia, payload)
-	})
-	defer conn.Close()
+	receiver.Register(s)
+	defer func() {
+		receiver.Unregister(s.sourceID)
+		conn.Close()
+	}()
 
-	log.Printf("session: connected from %s", conn.RemoteAddr())
+	log.Printf("session: connected from %s as %s", conn.RemoteAddr(), s.sourceID)
 
 	for {
 		msg, err := ReadMessage(conn)
 		if err != nil {
-			log.Printf("session: read error: %v", err)
+			log.Printf("session[%s]: read error: %v", s.sourceID, err)
 			return
 		}
 		s.handleMessage(msg)
@@ -81,10 +83,10 @@ func (s *Session) handleMessage(msg *pb.CastMessage) {
 		s.handleDeviceAuth(src, msg)
 	case nsMedia:
 		if msg.GetPayloadType() == pb.CastMessage_STRING {
-			s.media.Handle(src, json.RawMessage(msg.GetPayloadUtf8()))
+			handleMediaMessage(s.receiver, src, json.RawMessage(msg.GetPayloadUtf8()))
 		}
 	default:
-		log.Printf("session: unknown namespace %q from %s", ns, src)
+		log.Printf("session[%s]: unknown namespace %q from %s", s.sourceID, ns, src)
 	}
 }
 
@@ -97,9 +99,9 @@ func (s *Session) handleConnection(src string, msg *pb.CastMessage) {
 	}
 	switch c.Type {
 	case "CONNECT":
-		log.Printf("connection: CONNECT from %s", src)
+		log.Printf("session[%s]: CONNECT from %s", s.sourceID, src)
 	case "CLOSE":
-		log.Printf("connection: CLOSE from %s", src)
+		log.Printf("session[%s]: CLOSE from %s", s.sourceID, src)
 	}
 }
 
@@ -131,7 +133,7 @@ func (s *Session) handleReceiver(src string, msg *pb.CastMessage) {
 		resp := map[string]interface{}{
 			"requestId": req.RequestID,
 			"status": map[string]interface{}{
-				"applications": s.apps,
+				"applications":  s.apps,
 				"isActiveInput": true,
 				"volume": map[string]interface{}{
 					"level": 1.0,
@@ -144,12 +146,11 @@ func (s *Session) handleReceiver(src string, msg *pb.CastMessage) {
 		s.send(src, nsReceiver, b)
 
 	case "LAUNCH":
-		log.Printf("receiver: LAUNCH %s", req.AppID)
-		// We auto-launch the Default Media Receiver for any app
+		log.Printf("session[%s]: LAUNCH %s", s.sourceID, req.AppID)
 		resp := map[string]interface{}{
 			"requestId": req.RequestID,
 			"status": map[string]interface{}{
-				"applications": s.apps,
+				"applications":  s.apps,
 				"isActiveInput": true,
 				"volume": map[string]interface{}{
 					"level": 1.0,
@@ -169,7 +170,7 @@ func (s *Session) handleReceiver(src string, msg *pb.CastMessage) {
 			} `json:"volume"`
 		}
 		json.Unmarshal([]byte(msg.GetPayloadUtf8()), &volReq)
-		log.Printf("receiver: SET_VOLUME level=%v muted=%v", volReq.Volume.Level, volReq.Volume.Muted)
+		log.Printf("session[%s]: SET_VOLUME", s.sourceID)
 		resp := map[string]interface{}{
 			"requestId": req.RequestID,
 			"type":      "RECEIVER_STATUS",
@@ -178,14 +179,19 @@ func (s *Session) handleReceiver(src string, msg *pb.CastMessage) {
 		s.send(src, nsReceiver, b)
 
 	default:
-		log.Printf("receiver: unknown type %q", req.Type)
+		log.Printf("session[%s]: receiver unknown type %q", s.sourceID, req.Type)
 	}
 }
 
 func (s *Session) handleDeviceAuth(src string, msg *pb.CastMessage) {
-	log.Printf("deviceauth: challenge from %s", src)
-	// ponytail: refuse auth; most senders skip the auth step or tolerate failure
-	// Full auth requires Google's certificate chain which we don't have
+	log.Printf("session[%s]: deviceauth challenge", s.sourceID)
+	auth := s.receiver.Authenticator()
+	sig, err := auth.SignTLS()
+	if err != nil {
+		log.Printf("session[%s]: sign error: %v", s.sourceID, err)
+		return
+	}
+
 	resp := &pb.CastMessage{
 		ProtocolVersion: pb.CastMessage_CASTV2_1_0.Enum(),
 		SourceId:        proto.String("receiver-0"),
@@ -194,8 +200,10 @@ func (s *Session) handleDeviceAuth(src string, msg *pb.CastMessage) {
 		PayloadType:     pb.CastMessage_BINARY.Enum(),
 	}
 	authMsg := &pb.DeviceAuthMessage{
-		Error: &pb.AuthError{
-			ErrorType: pb.AuthError_INTERNAL_ERROR.Enum(),
+		Response: &pb.AuthResponse{
+			Signature:             sig,
+			ClientAuthCertificate: auth.AuthCertDER,
+			ClientCa:              [][]byte{auth.AuthCertDER},
 		},
 	}
 	b, _ := proto.Marshal(authMsg)
@@ -215,6 +223,21 @@ func (s *Session) send(dest, ns string, payload json.RawMessage) {
 		PayloadUtf8:     proto.String(string(payload)),
 	}
 	if err := WriteMessage(s.conn, msg); err != nil {
-		log.Printf("send error: %v", err)
+		log.Printf("session[%s]: send error: %v", s.sourceID, err)
+	}
+}
+
+// sendRaw writes a raw CastMessage to this session's connection (no lock).
+func (s *Session) sendRaw(ns string, payload json.RawMessage) {
+	msg := &pb.CastMessage{
+		ProtocolVersion: pb.CastMessage_CASTV2_1_0.Enum(),
+		SourceId:        proto.String("receiver-0"),
+		DestinationId:   proto.String(s.sourceID),
+		Namespace:       proto.String(ns),
+		PayloadType:     pb.CastMessage_STRING.Enum(),
+		PayloadUtf8:     proto.String(string(payload)),
+	}
+	if err := WriteMessage(s.conn, msg); err != nil {
+		log.Printf("session[%s]: sendRaw error: %v", s.sourceID, err)
 	}
 }

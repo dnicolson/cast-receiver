@@ -2,45 +2,43 @@ package cast
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 const nsMedia = "urn:x-cast:com.google.cast.media"
 
-// MediaSession tracks one active media playback session.
+// MediaSession tracks media playback state shared across all senders.
 type MediaSession struct {
-	mu           sync.Mutex
-	SessionID    int    `json:"sessionId"`
-	Media        *MediaInfo
-	PlayerState  string  `json:"playerState"`  // IDLE, PLAYING, PAUSED, BUFFERING
-	IdleReason   string  `json:"idleReason,omitempty"`
-	CurrentTime  float64 `json:"currentTime"`
-	Volume       Volume  `json:"volume"`
-	ActiveTrackIDs []int `json:"activeTrackIds,omitempty"`
+	mu             sync.Mutex
+	SessionID      int        `json:"sessionId"`
+	Media          *MediaInfo `json:"media,omitempty"`
+	PlayerState    string     `json:"playerState"`
+	IdleReason     string     `json:"idleReason,omitempty"`
+	CurrentTime    float64    `json:"currentTime"`
+	Volume         Volume     `json:"volume"`
+	ActiveTrackIDs []int      `json:"activeTrackIds,omitempty"`
 
-	// playback control
-	cmd    *exec.Cmd
-	stdin  ioWriteCloser
-	cancel func()
+	cmd       *exec.Cmd
+	stopProxy func()
 }
 
-// MediaInfo is a minimal representation of loaded media.
 type MediaInfo struct {
-	ContentID   string `json:"contentId"`
-	ContentType string `json:"contentType"`
-	StreamType  string `json:"streamType"`
-	Duration    float64    `json:"duration,omitempty"`
-	Metadata    *Metadata  `json:"metadata,omitempty"`
+	ContentID   string    `json:"contentId"`
+	ContentType string    `json:"contentType"`
+	StreamType  string    `json:"streamType,omitempty"`
+	Duration    float64   `json:"duration,omitempty"`
+	Metadata    *Metadata `json:"metadata,omitempty"`
 }
 
 type Metadata struct {
-	Title  string `json:"title,omitempty"`
+	Title  string  `json:"title,omitempty"`
 	Images []Image `json:"images,omitempty"`
 }
 
@@ -51,28 +49,6 @@ type Image struct {
 type Volume struct {
 	Level float64 `json:"level"`
 	Muted bool    `json:"muted"`
-}
-
-// nsMediaHandler handles the urn:x-cast:com.google.cast.media namespace.
-type nsMediaHandler struct {
-	session  *MediaSession
-	sendMsg  func(dest string, payload json.RawMessage)
-}
-
-type ioWriteCloser interface {
-	Write([]byte) (int, error)
-	Close() error
-}
-
-func newMediaHandler(sendMsg func(string, json.RawMessage)) *nsMediaHandler {
-	return &nsMediaHandler{
-		session: &MediaSession{
-			SessionID:   rand.Int(),
-			PlayerState: "IDLE",
-			Volume:      Volume{Level: 1, Muted: false},
-		},
-		sendMsg: sendMsg,
-	}
 }
 
 type mediaRequest struct {
@@ -88,7 +64,8 @@ type mediaStatusMsg struct {
 	Status    []*MediaSession `json:"status"`
 }
 
-func (h *nsMediaHandler) Handle(src string, body json.RawMessage) {
+// handleMediaMessage routes media namespace commands using the Receiver's shared state.
+func handleMediaMessage(r *Receiver, src string, body json.RawMessage) {
 	var req mediaRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		log.Printf("media: bad request: %v", err)
@@ -96,58 +73,88 @@ func (h *nsMediaHandler) Handle(src string, body json.RawMessage) {
 	}
 	switch req.Type {
 	case "LOAD":
-		h.handleLoad(src, &req)
+		handleLoad(r, src, &req)
 	case "PLAY":
-		h.handlePlay(src, &req)
+		handlePlay(r, src, &req)
 	case "PAUSE":
-		h.handlePause(src, &req)
+		handlePause(r, src, &req)
 	case "STOP":
-		h.handleStop(src, &req)
+		handleStop(r, src, &req)
 	case "GET_STATUS":
-		h.sendStatus(src, req.RequestID)
+		sendMediaStatus(r, src, req.RequestID)
 	default:
 		log.Printf("media: unknown type %q", req.Type)
 	}
 }
 
-func (h *nsMediaHandler) handleLoad(src string, req *mediaRequest) {
-	h.session.mu.Lock()
-	h.session.Media = req.Media
-	h.session.PlayerState = "BUFFERING"
-	h.session.mu.Unlock()
+func handleLoad(r *Receiver, src string, req *mediaRequest) {
+	r.Media.mu.Lock()
+	r.Media.Media = req.Media
+	r.Media.PlayerState = "BUFFERING"
+	r.Media.mu.Unlock()
 
 	contentID := ""
-	contentType := "video/mp4"
+	
 	if req.Media != nil {
 		contentID = req.Media.ContentID
-		contentType = req.Media.ContentType
+		
 	}
 
-	// If it's a local file, try to start ffplay for audio playback
-	// (ponytail: ffplay for now; proper http range streaming if needed)
-	if contentID != "" && contentType != "" {
-		go h.playMedia(contentID)
-	}
-
-	// Wait a moment then mark as playing
-	// ponytail: hardcoded BUFFERING->PLAYING; real buffering state management if needed
-	time.Sleep(500 * time.Millisecond)
-	h.session.mu.Lock()
-	h.session.PlayerState = "PLAYING"
-	h.session.mu.Unlock()
-
-	h.sendStatus(src, req.RequestID)
-}
-
-func (h *nsMediaHandler) playMedia(path string) {
-	// If it's a URL, we don't know how to play it - just log
-	// ponytail: local file playback only; add URL streaming with ffmpeg pipe if needed
-	if path != "" && path[0] != '/' {
-		log.Printf("media: remote URL %q — no playback, just acknowledging", path)
+	if contentID == "" {
+		sendMediaStatus(r, src, req.RequestID)
 		return
 	}
 
-	// Check file exists
+	if strings.Contains(contentID, "://") {
+		handleRemoteURL(r, contentID)
+	} else {
+		go playLocalFile(r, contentID)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	r.Media.mu.Lock()
+	r.Media.PlayerState = "PLAYING"
+	r.Media.mu.Unlock()
+	sendMediaStatus(r, src, req.RequestID)
+}
+
+func handleRemoteURL(r *Receiver, url string) {
+	log.Printf("media: proxying remote URL %s", url)
+
+	port, stop := StartProxy(url)
+	if port == 0 {
+		log.Printf("media: failed to start proxy for %s", url)
+		return
+	}
+
+	r.Media.mu.Lock()
+	r.Media.stopProxy = stop
+	if r.Media.Media != nil {
+		r.Media.Media.ContentID = fmt.Sprintf("http://127.0.0.1:%d/stream", port)
+	}
+	r.Media.mu.Unlock()
+
+	go func() {
+		cmd := exec.Command("ffplay", "-nodisp", "-autoexit", fmt.Sprintf("http://127.0.0.1:%d/stream", port))
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		r.Media.mu.Lock()
+		r.Media.cmd = cmd
+		r.Media.mu.Unlock()
+		if err := cmd.Run(); err != nil {
+			log.Printf("media: ffplay exited: %v", err)
+		}
+		r.Media.mu.Lock()
+		r.Media.PlayerState = "IDLE"
+		r.Media.mu.Unlock()
+	}()
+}
+
+func playLocalFile(r *Receiver, path string) {
+	if path[0] != '/' {
+		log.Printf("media: remote URL %q — can't play", path)
+		return
+	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		log.Printf("media: bad path %q: %v", path, err)
@@ -157,56 +164,56 @@ func (h *nsMediaHandler) playMedia(path string) {
 		log.Printf("media: file not found: %s", absPath)
 		return
 	}
-
 	log.Printf("media: playing %s", absPath)
 
-	// Use ffplay in a new process group so we can kill it
-	// ponytail: exec'd ffplay; embed a player with go-mpv if we need more control
 	cmd := exec.Command("ffplay", "-nodisp", "-autoexit", absPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	h.session.mu.Lock()
-	h.session.cmd = cmd
-	h.session.mu.Unlock()
+	r.Media.mu.Lock()
+	r.Media.cmd = cmd
+	r.Media.mu.Unlock()
 	if err := cmd.Run(); err != nil {
 		log.Printf("media: ffplay exited: %v", err)
 	}
-	h.session.mu.Lock()
-	h.session.PlayerState = "IDLE"
-	h.session.mu.Unlock()
+	r.Media.mu.Lock()
+	r.Media.PlayerState = "IDLE"
+	r.Media.mu.Unlock()
 }
 
-func (h *nsMediaHandler) handlePlay(src string, req *mediaRequest) {
-	h.session.mu.Lock()
-	h.session.PlayerState = "PLAYING"
-	h.session.mu.Unlock()
-	h.sendStatus(src, req.RequestID)
+func handlePlay(r *Receiver, src string, req *mediaRequest) {
+	r.Media.mu.Lock()
+	r.Media.PlayerState = "PLAYING"
+	r.Media.mu.Unlock()
+	sendMediaStatus(r, src, req.RequestID)
 }
 
-func (h *nsMediaHandler) handlePause(src string, req *mediaRequest) {
-	h.session.mu.Lock()
-	h.session.PlayerState = "PAUSED"
-	h.session.mu.Unlock()
-	// ponytail: no actual ffplay pause (ffplay has no stdin control); add proper IPC if pausing matters
-	h.sendStatus(src, req.RequestID)
+func handlePause(r *Receiver, src string, req *mediaRequest) {
+	r.Media.mu.Lock()
+	r.Media.PlayerState = "PAUSED"
+	r.Media.mu.Unlock()
+	sendMediaStatus(r, src, req.RequestID)
 }
 
-func (h *nsMediaHandler) handleStop(src string, req *mediaRequest) {
-	h.session.mu.Lock()
-	h.session.PlayerState = "IDLE"
-	h.session.IdleReason = "CANCELLED"
-	if h.session.cmd != nil && h.session.cmd.Process != nil {
-		h.session.cmd.Process.Kill()
+func handleStop(r *Receiver, src string, req *mediaRequest) {
+	r.Media.mu.Lock()
+	r.Media.PlayerState = "IDLE"
+	r.Media.IdleReason = "CANCELLED"
+	if r.Media.cmd != nil && r.Media.cmd.Process != nil {
+		r.Media.cmd.Process.Kill()
 	}
-	h.session.cmd = nil
-	h.session.mu.Unlock()
-	h.sendStatus(src, req.RequestID)
+	r.Media.cmd = nil
+	if r.Media.stopProxy != nil {
+		r.Media.stopProxy()
+		r.Media.stopProxy = nil
+	}
+	r.Media.mu.Unlock()
+	sendMediaStatus(r, src, req.RequestID)
 }
 
-func (h *nsMediaHandler) sendStatus(src string, reqID int) {
-	h.session.mu.Lock()
-	status := *h.session
-	h.session.mu.Unlock()
+func sendMediaStatus(r *Receiver, src string, reqID int) {
+	r.Media.mu.Lock()
+	status := *r.Media
+	r.Media.mu.Unlock()
 
 	msg := mediaStatusMsg{
 		Type:      "MEDIA_STATUS",
@@ -214,7 +221,6 @@ func (h *nsMediaHandler) sendStatus(src string, reqID int) {
 		Status:    []*MediaSession{&status},
 	}
 	b, _ := json.Marshal(msg)
-	h.sendMsg(src, json.RawMessage(b))
+	// Send to the requesting sender + broadcast to all others
+	r.Broadcast(src, nsMedia, json.RawMessage(b))
 }
-
-
