@@ -1,0 +1,47 @@
+# =============================================================================
+# Go CI — quality gate for Go projects
+# =============================================================================
+# Adapted from: grave0x/ci-cd-templates/.github/workflows/ci-go.yml
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    name: "Go ${{ matrix.go-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.22", "1.23"]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Format check
+        run: |
+          if [ "$(gofmt -l . | wc -l)" -gt 0 ]; then
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race -count=1 -v ./...
+
+      - name: Build
+        run: go build ./...

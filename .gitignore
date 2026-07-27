@@ -1,0 +1,20 @@
+# Binary
+cast-receiver
+cast-receiver.exe
+
+# TLS certs generated on first run
+cert.pem
+key.pem
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+dist/
