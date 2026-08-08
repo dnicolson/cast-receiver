@@ -5,68 +5,322 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #111; color: #eee; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-.card { background: #1a1a2e; border-radius: 16px; padding: 32px; width: 380px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-h1 { font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #fff; }
-.row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #2a2a3e; }
-.row:last-child { border-bottom: none; }
-.label { color: #888; }
-.value { color: #fff; font-weight: 500; }
-.state-idle { color: #666; }
-.state-playing { color: #4ade80; }
-.state-paused { color: #fbbf24; }
-.state-buffering { color: #60a5fa; }
-.vol-bar { height: 6px; background: #2a2a3e; border-radius: 3px; margin-top: 6px; overflow: hidden; }
-.vol-fill { height: 100%; background: #4ade80; border-radius: 3px; transition: width 0.3s; }
-.controls { display: flex; gap: 12px; margin-top: 16px; justify-content: center; }
-.controls button { background: #2a2a3e; border: none; color: #fff; font-size: 18px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; }
-.controls button:hover { background: #3a3a5e; }
-.controls button:active { background: #4a4a6e; }
-.nowplaying { margin-top: 12px; padding: 10px; background: #16213e; border-radius: 8px; font-size: 13px; word-break: break-all; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #101214;
+  color: #eceff3;
+}
+main {
+  width: min(1180px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+.state {
+  min-width: 94px;
+  padding: 5px 9px;
+  border: 1px solid #3a414b;
+  border-radius: 6px;
+  color: #b8c0cc;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.state-playing { color: #78d28b; border-color: #2c6f3d; }
+.state-paused { color: #efc66f; border-color: #7b5d1f; }
+.state-buffering { color: #82b6ff; border-color: #315d91; }
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+}
+.player-wrap {
+  background: #060708;
+  border: 1px solid #252a31;
+  border-radius: 8px;
+  overflow: hidden;
+}
+video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #050607;
+}
+.empty {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  color: #8e97a3;
+  border-top: 1px solid #252a31;
+  font-size: 14px;
+}
+.panel {
+  border: 1px solid #303741;
+  border-radius: 8px;
+  background: #171a1f;
+  padding: 14px;
+}
+.controls {
+  display: grid;
+  grid-template-columns: repeat(3, 44px);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+button {
+  height: 40px;
+  border: 1px solid #3b4350;
+  border-radius: 6px;
+  background: #222831;
+  color: #fff;
+  cursor: pointer;
+  font-size: 16px;
+}
+button:hover { background: #2c3440; }
+button:active { background: #353f4d; }
+.row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid #2a3038;
+  font-size: 13px;
+}
+.row:first-of-type { border-top: 0; }
+.label { color: #8f98a5; }
+.value {
+  color: #eef2f6;
+  overflow-wrap: anywhere;
+}
+.notice {
+  margin-top: 12px;
+  color: #d7b970;
+  font-size: 13px;
+  line-height: 1.35;
+  display: none;
+}
+@media (max-width: 800px) {
+  main { width: min(100vw - 20px, 760px); padding-top: 12px; }
+  .layout { grid-template-columns: 1fr; }
+  .topbar { align-items: flex-start; }
+}
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>📺 Cast Receiver</h1>
-  <div class="row"><span class="label">State</span><span class="value" id="state">—</span></div>
-  <div class="row"><span class="label">Volume</span><span class="value" id="volume">—</span></div>
-  <div class="vol-bar"><div class="vol-fill" id="volFill" style="width:100%"></div></div>
-  <div class="row"><span class="label">Sessions</span><span class="value" id="sessions">0</span></div>
-  <div class="nowplaying" id="nowplaying">No media loaded</div>
-  <div class="controls">
-    <button id="btnPlay" title="Play">▶</button>
-    <button id="btnPause" title="Pause">⏸</button>
-    <button id="btnStop" title="Stop">⏹</button>
+<main>
+  <div class="topbar">
+    <h1>📺 Cast Receiver</h1>
+    <div class="state" id="state">IDLE</div>
   </div>
-</div>
+
+  <div class="layout">
+    <section class="player-wrap">
+      <video id="player" controls playsinline preload="metadata"></video>
+      <div class="empty" id="empty">No media loaded</div>
+    </section>
+
+    <aside class="panel">
+      <div class="controls">
+        <button id="btnPlay" title="Play" aria-label="Play">&#9658;</button>
+        <button id="btnPause" title="Pause" aria-label="Pause">&#10074;&#10074;</button>
+        <button id="btnStop" title="Stop" aria-label="Stop">&#9632;</button>
+      </div>
+      <div class="row"><div class="label">Title</div><div class="value" id="title">Untitled</div></div>
+      <div class="row"><div class="label">Type</div><div class="value" id="type">-</div></div>
+      <div class="row"><div class="label">Duration</div><div class="value" id="duration">-</div></div>
+      <div class="row"><div class="label">Sessions</div><div class="value" id="sessions">0</div></div>
+      <div class="row"><div class="label">Volume</div><div class="value" id="volume">100%</div></div>
+      <div class="row"><div class="label">Source</div><div class="value" id="source">-</div></div>
+      <div class="notice" id="notice"></div>
+    </aside>
+  </div>
+</main>
+
 <script>
+const player = document.getElementById('player');
+const empty = document.getElementById('empty');
 const stateEl = document.getElementById('state');
-const volEl = document.getElementById('volume');
-const volFill = document.getElementById('volFill');
-const sesEl = document.getElementById('sessions');
-const npEl = document.getElementById('nowplaying');
+const titleEl = document.getElementById('title');
+const typeEl = document.getElementById('type');
+const durationEl = document.getElementById('duration');
+const sessionsEl = document.getElementById('sessions');
+const volumeEl = document.getElementById('volume');
+const sourceEl = document.getElementById('source');
+const noticeEl = document.getElementById('notice');
+let activeSession = 0;
+let pendingAutoplaySession = 0;
+let lastSyncedPlaybackKey = '';
 
-function update() {
-  fetch('/api/status').then(r => r.json()).then(d => {
-    stateEl.textContent = d.playerState;
-    stateEl.className = 'value state-' + d.playerState.toLowerCase();
-    volEl.textContent = Math.round(d.volume * 100) + '%';
-    volFill.style.width = (d.volume * 100) + '%';
-    sesEl.textContent = d.sessions;
-    if (d.contentId) {
-      npEl.innerHTML = '<b>' + (d.title || 'Untitled') + '</b><br>' + d.contentId + '<br>' + d.contentType;
-    } else {
-      npEl.textContent = 'No media loaded';
-    }
-  }).catch(() => {});
+function setNotice(text) {
+  noticeEl.textContent = text;
+  noticeEl.style.display = text ? 'block' : 'none';
 }
-setInterval(update, 2000);
-update();
 
-document.getElementById('btnPlay').onclick = () => fetch('/api/play', {method:'POST'});
-document.getElementById('btnPause').onclick = () => fetch('/api/pause', {method:'POST'});
-document.getElementById('btnStop').onclick = () => fetch('/api/stop', {method:'POST'});
+function setState(state) {
+  const normalized = (state || 'IDLE').toLowerCase();
+  stateEl.textContent = state || 'IDLE';
+  stateEl.className = 'state state-' + normalized;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-';
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function attachStream(status) {
+  const session = status.mediaSessionId || 0;
+  if (!status.contentId || !session) {
+    activeSession = 0;
+    pendingAutoplaySession = 0;
+    lastSyncedPlaybackKey = '';
+    player.removeAttribute('src');
+    player.load();
+    empty.textContent = 'No media loaded';
+    empty.style.display = 'grid';
+    return;
+  }
+  if (session === activeSession) return;
+  activeSession = session;
+  const state = String(status.playerState || '').toUpperCase();
+  lastSyncedPlaybackKey = session + '|' + state;
+  player.src = status.streamPath + '?session=' + encodeURIComponent(session);
+  player.load();
+  empty.style.display = 'none';
+  setNotice('');
+  if (state === 'PLAYING') {
+    pendingAutoplaySession = session;
+    attemptPendingAutoplay();
+  }
+}
+
+function attemptPendingAutoplay() {
+  if (!pendingAutoplaySession || pendingAutoplaySession !== activeSession || !player.src) return;
+  player.play().then(() => {
+    pendingAutoplaySession = 0;
+    setNotice('');
+  }).catch((error) => {
+    const name = error && error.name ? error.name : '';
+    if (name === 'AbortError') return;
+    if (name === 'NotAllowedError' && !player.muted) {
+      player.muted = true;
+      setNotice('Playback started muted. Use the video controls to unmute.');
+      setTimeout(attemptPendingAutoplay, 0);
+      return;
+    }
+    pendingAutoplaySession = 0;
+    setNotice('Use the video controls to start playback.');
+  });
+}
+
+function playFromReceiverState() {
+  if (!player.src) return;
+  player.play().then(() => {
+    setNotice('');
+  }).catch((error) => {
+    const name = error && error.name ? error.name : '';
+    if (name === 'AbortError') return;
+    if (name === 'NotAllowedError' && !player.muted) {
+      player.muted = true;
+      setNotice('Playback started muted. Use the video controls to unmute.');
+      setTimeout(playFromReceiverState, 0);
+      return;
+    }
+    setNotice('Use the video controls to start playback.');
+  });
+}
+
+function syncReceiverPlayback(status) {
+  const session = status.mediaSessionId || 0;
+  if (!session || session !== activeSession || !player.src) return;
+
+  const state = String(status.playerState || '').toUpperCase();
+  const key = session + '|' + state;
+  if (key === lastSyncedPlaybackKey) return;
+  lastSyncedPlaybackKey = key;
+
+  if (state === 'PAUSED') {
+    pendingAutoplaySession = 0;
+    if (!player.paused) {
+      player.pause();
+    }
+    return;
+  }
+
+  if (state === 'PLAYING' && player.paused) {
+    playFromReceiverState();
+  }
+}
+
+async function update() {
+  try {
+    const response = await fetch('/api/status', { cache: 'no-store' });
+    const status = await response.json();
+    setState(status.playerState);
+    titleEl.textContent = status.title || 'Untitled';
+    typeEl.textContent = [status.contentType, status.streamType].filter(Boolean).join(' / ') || '-';
+    durationEl.textContent = formatDuration(Number(status.duration));
+    sessionsEl.textContent = status.sessions || 0;
+    volumeEl.textContent = Math.round((status.volume || 0) * 100) + '%';
+    sourceEl.textContent = status.contentId || '-';
+    attachStream(status);
+    syncReceiverPlayback(status);
+  } catch (_) {
+    setNotice('Receiver status is unavailable.');
+  }
+}
+
+player.addEventListener('error', () => {
+  pendingAutoplaySession = 0;
+  if (player.src) setNotice('The browser could not play this stream format.');
+});
+player.addEventListener('loadedmetadata', () => {
+  attemptPendingAutoplay();
+});
+player.addEventListener('canplay', () => {
+  attemptPendingAutoplay();
+});
+player.addEventListener('playing', () => {
+  pendingAutoplaySession = 0;
+});
+
+document.getElementById('btnPlay').addEventListener('click', async () => {
+  await fetch('/api/play', { method: 'POST' }).catch(() => {});
+  if (player.src) {
+    player.play().catch(() => setNotice('Use the video controls to start playback.'));
+  }
+});
+document.getElementById('btnPause').addEventListener('click', async () => {
+  player.pause();
+  await fetch('/api/pause', { method: 'POST' }).catch(() => {});
+});
+document.getElementById('btnStop').addEventListener('click', async () => {
+  player.pause();
+  await fetch('/api/stop', { method: 'POST' }).catch(() => {});
+  await update();
+});
+
+setInterval(update, 1000);
+update();
 </script>
 </body>
 </html>
