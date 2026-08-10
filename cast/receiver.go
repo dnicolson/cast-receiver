@@ -47,14 +47,10 @@ func NewAuthenticator(tlsCertDER []byte) (*Authenticator, error) {
 	}, nil
 }
 
-// SignTLS returns an ECDSA signature of the SHA256 hash of the TLS cert DER.
+// SignTLS returns an ASN.1 ECDSA signature of the SHA256 hash of the TLS cert DER.
 func (a *Authenticator) SignTLS() ([]byte, error) {
 	h := sha256.Sum256(a.TLSCertDER)
-	r, s, err := ecdsa.Sign(rand.Reader, a.AuthKey, h[:])
-	if err != nil {
-		return nil, err
-	}
-	return append(r.Bytes(), s.Bytes()...), nil
+	return ecdsa.SignASN1(rand.Reader, a.AuthKey, h[:])
 }
 
 // Receiver holds shared Cast receiver state visible to all connected senders.
@@ -66,6 +62,9 @@ type Receiver struct {
 	auth        *Authenticator
 	volume      Volume
 	nextSession int
+	appLaunched bool
+	appID       string
+	mediaSeq    int
 }
 
 // NewReceiver creates a Receiver.
@@ -73,7 +72,9 @@ func NewReceiver(auth *Authenticator) *Receiver {
 	return &Receiver{
 		sessions: make(map[string]*Session),
 		Media: &MediaSession{
-			PlayerState: "IDLE",
+			PlayerState:  "IDLE",
+			PlaybackRate: 0,
+			Volume:       Volume{Level: 1, Muted: false},
 		},
 		auth:   auth,
 		volume: Volume{Level: 1, Muted: false},
@@ -103,11 +104,16 @@ func (r *Receiver) Unregister(sourceID string) {
 // Broadcast sends a message on a namespace to all sessions except the sender.
 func (r *Receiver) Broadcast(src, ns string, payload json.RawMessage) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var sessions []*Session
 	for id, s := range r.sessions {
 		if id == src {
 			continue
 		}
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+
+	for _, s := range sessions {
 		s.sendRaw(ns, payload)
 	}
 }
@@ -135,20 +141,62 @@ func (r *Receiver) Volume() Volume {
 // SetVolume updates the volume.
 func (r *Receiver) SetVolume(v Volume) {
 	r.mu.Lock()
+	v.Level = clampVolume(v.Level)
 	r.volume = v
 	r.mu.Unlock()
 }
 
 // AppStatus returns the app list for RECEIVER_STATUS.
 func (r *Receiver) AppStatus() []AppStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.appStatusLocked()
+}
+
+// LaunchApp marks a Cast app transport as running.
+func (r *Receiver) LaunchApp(appID string) []AppStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if appID == "" {
+		appID = defaultAppID
+	}
+	r.appLaunched = true
+	r.appID = appID
+	return r.appStatusLocked()
+}
+
+// CloseApp marks the default media receiver app as stopped.
+func (r *Receiver) CloseApp() {
+	r.mu.Lock()
+	r.appLaunched = false
+	r.appID = ""
+	r.mu.Unlock()
+}
+
+func (r *Receiver) appStatusLocked() []AppStatus {
+	if !r.appLaunched {
+		return []AppStatus{}
+	}
+	appID := r.appID
+	if appID == "" {
+		appID = defaultAppID
+	}
 	return []AppStatus{{
-		AppID:       "CC1AD845",
+		AppID:       appID,
 		DisplayName: "Default Media Receiver",
 		Namespaces:  []string{nsMedia},
 		SessionID:   "session-1",
 		StatusText:  "Ready To Cast",
 		TransportID: "web-1",
 	}}
+}
+
+// NextMediaSessionID returns a non-zero mediaSessionId for LOAD responses.
+func (r *Receiver) NextMediaSessionID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mediaSeq++
+	return r.mediaSeq
 }
 
 // SendCastMessage builds and writes a CastMessage on an io.Writer.
