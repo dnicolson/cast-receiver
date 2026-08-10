@@ -48,8 +48,28 @@ func StartProxy(remoteURL string) (int, func()) {
 }
 
 func (p *ProxyServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	ProxyMedia(w, r, p.remote)
+}
+
+// ProxyMedia proxies an HTTP media URL to the dashboard's same-origin player.
+func ProxyMedia(w http.ResponseWriter, r *http.Request, source string) {
+	if source == "" {
+		http.Error(w, "no media loaded", http.StatusNotFound)
+		return
+	}
+	if r.Method == http.MethodOptions {
+		writeProxyCORS(w)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Build proxied request
-	req, err := http.NewRequest(r.Method, p.remote, nil)
+	upstream := normalizeHTTPMediaURL(source)
+	req, err := http.NewRequest(r.Method, upstream, nil)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusInternalServerError)
 		return
@@ -70,9 +90,7 @@ func (p *ProxyServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// Copy response headers (selectively — add CORS)
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type")
+	writeProxyCORS(w)
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -90,13 +108,19 @@ func (p *ProxyServer) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 	written, _ := io.Copy(w, resp.Body)
-	log.Printf("proxy: %s %s → %d (%d bytes)", r.Method, p.remote, resp.StatusCode, written)
+	log.Printf("proxy: %s %s -> %d (%d bytes)", r.Method, source, resp.StatusCode, written)
+}
+
+func writeProxyCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type")
 }
 
 // GetPage is a helper to fetch a URL and return the body as string.
 // Used internally when resolving media URLs. (ponytail: unused for now, placeholder)
 func GetPage(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := http.Get(normalizeHTTPMediaURL(url))
 	if err != nil {
 		return "", err
 	}
