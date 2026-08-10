@@ -1,9 +1,8 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -17,11 +16,17 @@ import (
 	"time"
 
 	"cast-receiver/cast"
+	"cast-receiver/casttls"
 
 	"github.com/hashicorp/mdns"
 )
 
 var version = "dev" // overridden by goreleaser
+
+const (
+	castCapabilityVideo = 0x01
+	castCapabilityAudio = 0x04
+)
 
 func main() {
 	port := flag.Int("port", 8009, "TLS listen port")
@@ -32,18 +37,9 @@ func main() {
 	certFile := "cert.pem"
 	keyFile := "key.pem"
 
-	// Generate self-signed TLS cert if it doesn't exist
-	// ponytail: generate once, reuse; add cert rotation if running 24/7 for weeks
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		log.Println("generating self-signed TLS certificate...")
-		if err := generateCert(certFile, keyFile); err != nil {
-			log.Fatalf("cert generation: %v", err)
-		}
-	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := loadOrCreateTLSCertificate(certFile, keyFile, *name)
 	if err != nil {
-		log.Fatalf("load cert: %v", err)
+		log.Fatalf("TLS certificate: %v", err)
 	}
 
 	// Extract DER bytes of the TLS cert for device auth signing.
@@ -83,7 +79,7 @@ func main() {
 			fmt.Sprintf("id=%012x", time.Now().Unix()),
 			"fn=" + *name,
 			"md=GoCastReceiver",
-			"ca=2800",
+			fmt.Sprintf("ca=%d", castCapabilityVideo|castCapabilityAudio),
 			"ic=/setup/icon.png",
 		},
 	)
@@ -100,13 +96,13 @@ func main() {
 	log.Printf("advertising %s on _googlecast._tcp port %d", *name, *port)
 
 	// TLS listener
-	// ponytail: no client cert verification; add if senders require mutual TLS
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientAuth:   tls.NoClientCert,
+		MinVersion:   tls.VersionTLS12,
 	}
 
-	listener, err := tls.Listen("tcp", fmt.Sprintf(":%d", *port), tlsCfg)
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
@@ -120,14 +116,67 @@ func main() {
 			log.Printf("accept: %v", err)
 			continue
 		}
-		tlsConn := conn.(*tls.Conn)
-		// ponytail: sequential handling; add goroutine per conn if multiple senders need simultaneous support
-		go cast.HandleConnection(tlsConn, receiver)
+		go casttls.HandleConnection(conn, tlsCfg, cert, func(conn net.Conn) {
+			cast.HandleConnection(conn, receiver)
+		})
 	}
 }
 
-func generateCert(certFile, keyFile string) error {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func loadOrCreateTLSCertificate(certFile, keyFile, name string) (tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err == nil {
+		if err := castTLSCertCompatible(cert.Certificate[0]); err == nil {
+			return cert, nil
+		} else {
+			log.Printf("regenerating TLS certificate: %v", err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("regenerating TLS certificate: %v", err)
+	}
+
+	log.Println("generating self-signed TLS certificate...")
+	if err := generateTLSCertificate(certFile, keyFile, name); err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate: %w", err)
+	}
+	cert, err = tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("load: %w", err)
+	}
+	if err := castTLSCertCompatible(cert.Certificate[0]); err != nil {
+		return tls.Certificate{}, fmt.Errorf("generated incompatible certificate: %w", err)
+	}
+	return cert, nil
+}
+
+func castTLSCertCompatible(certDER []byte) error {
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	pub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("server certificate uses %T, want RSA", cert.PublicKey)
+	}
+	if pub.N.BitLen() < 2048 {
+		return fmt.Errorf("RSA key is %d bits, want at least 2048", pub.N.BitLen())
+	}
+	if !cert.IsCA {
+		return fmt.Errorf("certificate missing CA basic constraint")
+	}
+	now := time.Now()
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return fmt.Errorf("certificate is outside its validity window")
+	}
+	for _, ip := range localCertificateIPs() {
+		if !certHasIP(cert, ip) {
+			return fmt.Errorf("certificate missing IP SAN %s", ip)
+		}
+	}
+	return nil
+}
+
+func generateTLSCertificate(certFile, keyFile, name string) error {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("generate key: %w", err)
 	}
@@ -136,15 +185,16 @@ func generateCert(certFile, keyFile string) error {
 		SerialNumber: big.NewInt(time.Now().Unix()),
 		Subject: pkix.Name{
 			Organization: []string{"Go Cast Receiver"},
-			CommonName:   "Go Cast Receiver",
+			CommonName:   name,
 		},
 		NotBefore:             time.Now().Add(-24 * time.Hour),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
+		IsCA:                  true,
 		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:           localCertificateIPs(),
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
@@ -152,18 +202,78 @@ func generateCert(certFile, keyFile string) error {
 		return fmt.Errorf("create cert: %w", err)
 	}
 
-	privBytes, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return err
-	}
+	privBytes := x509.MarshalPKCS1PrivateKey(priv)
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: privBytes})
 
 	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
 		return err
 	}
 	return os.WriteFile(keyFile, keyPEM, 0600)
+}
+
+func localCertificateIPs() []net.IP {
+	ips := []net.IP{
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("::1"),
+	}
+	for _, ip := range getAllLocalIPs() {
+		ips = appendUniqueIP(ips, ip)
+	}
+	return ips
+}
+
+func getAllLocalIPs() []net.IP {
+	var ips []net.IP
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsMulticast() {
+				continue
+			}
+			ips = appendUniqueIP(ips, ip)
+		}
+	}
+	return ips
+}
+
+func appendUniqueIP(ips []net.IP, ip net.IP) []net.IP {
+	if ip == nil {
+		return ips
+	}
+	for _, existing := range ips {
+		if existing.Equal(ip) {
+			return ips
+		}
+	}
+	return append(ips, ip)
+}
+
+func certHasIP(cert *x509.Certificate, ip net.IP) bool {
+	for _, certIP := range cert.IPAddresses {
+		if certIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func getOutboundIP() net.IP {
