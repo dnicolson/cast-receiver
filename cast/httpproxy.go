@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 )
 
@@ -69,6 +70,11 @@ func ProxyMedia(w http.ResponseWriter, r *http.Request, source string) {
 
 	// Build proxied request
 	upstream := normalizeHTTPMediaURL(source)
+	u, err := url.Parse(upstream)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		http.Error(w, "unsupported media URL scheme", http.StatusBadRequest)
+		return
+	}
 	req, err := http.NewRequest(r.Method, upstream, nil)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusInternalServerError)

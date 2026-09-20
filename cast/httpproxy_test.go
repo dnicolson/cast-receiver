@@ -111,8 +111,8 @@ func TestProxyMediaDoesNotServeLocalPaths(t *testing.T) {
 
 			ProxyMedia(rr, req, source)
 
-			if rr.Code != http.StatusBadGateway {
-				t.Fatalf("status for %q = %d, want %d", source, rr.Code, http.StatusBadGateway)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status for %q = %d, want %d", source, rr.Code, http.StatusBadRequest)
 			}
 		})
 	}

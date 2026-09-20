@@ -85,7 +85,7 @@ func StartDashboard(receiver *Receiver, port int) (func(), error) {
 		tmpl.Execute(w, map[string]interface{}{"Title": "Cast Receiver"})
 	})
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("dashboard listen: %w", err)
 	}
