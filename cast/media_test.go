@@ -167,7 +167,6 @@ func TestClampMediaTime(t *testing.T) {
 
 func TestSetVolumeClampsLevel(t *testing.T) {
 	r := NewReceiver(nil)
-	originalMediaVolume := r.Media.Volume
 	r.SetVolume(Volume{Level: 1.5, Muted: true})
 
 	vol := r.Volume()
@@ -180,10 +179,22 @@ func TestSetVolumeClampsLevel(t *testing.T) {
 
 	r.Media.mu.Lock()
 	defer r.Media.mu.Unlock()
-	if r.Media.Volume.Level != originalMediaVolume.Level {
-		t.Fatalf("Media volume level = %v, want %v", r.Media.Volume.Level, originalMediaVolume.Level)
+	if r.Media.Volume != vol {
+		t.Fatalf("Media volume = %v, want %v", r.Media.Volume, vol)
 	}
-	if r.Media.Volume.Muted != originalMediaVolume.Muted {
-		t.Fatalf("Media volume muted = %v, want %v", r.Media.Volume.Muted, originalMediaVolume.Muted)
+}
+
+func TestVolumeSharedAcrossLoadAndMediaCommands(t *testing.T) {
+	r := NewReceiver(nil)
+	s := &Session{receiver: r, conn: &appendConn{}}
+	r.SetVolume(Volume{Level: 0.4})
+	handleLoad(s, "sender-1", &mediaRequest{Media: &MediaInfo{ContentID: "https://example.test/video"}})
+	if got := buildMediaStatus(r, 0, 0).Status[0].Volume; got != r.Volume() {
+		t.Fatalf("loaded volume = %v, want %v", got, r.Volume())
+	}
+	muted := true
+	handleMediaVolume(s, "sender-1", &mediaRequest{Volume: &volumePatch{Muted: &muted}})
+	if got := r.Volume(); got != (Volume{Level: 0.4, Muted: true}) {
+		t.Fatalf("receiver volume after media mute = %v", got)
 	}
 }

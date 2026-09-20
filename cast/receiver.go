@@ -60,7 +60,6 @@ type Receiver struct {
 	sessions    map[string]*Session
 	Media       *MediaSession
 	auth        *Authenticator
-	volume      Volume
 	nextSession int
 	appLaunched bool
 	appID       string
@@ -76,8 +75,7 @@ func NewReceiver(auth *Authenticator) *Receiver {
 			PlaybackRate: 0,
 			Volume:       Volume{Level: 1, Muted: false},
 		},
-		auth:   auth,
-		volume: Volume{Level: 1, Muted: false},
+		auth: auth,
 	}
 }
 
@@ -133,17 +131,17 @@ func (r *Receiver) Authenticator() *Authenticator { return r.auth }
 
 // Volume returns the current volume.
 func (r *Receiver) Volume() Volume {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.volume
+	r.Media.mu.Lock()
+	defer r.Media.mu.Unlock()
+	return r.Media.Volume
 }
 
 // SetVolume updates the volume.
 func (r *Receiver) SetVolume(v Volume) {
-	r.mu.Lock()
+	r.Media.mu.Lock()
+	defer r.Media.mu.Unlock()
 	v.Level = clampVolume(v.Level)
-	r.volume = v
-	r.mu.Unlock()
+	r.Media.Volume = v
 }
 
 // AppStatus returns the app list for RECEIVER_STATUS.
