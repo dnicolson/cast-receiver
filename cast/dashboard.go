@@ -28,6 +28,7 @@ func StartDashboard(receiver *Receiver, port int) (func(), error) {
 		ps := receiver.Media.PlayerState
 		ir := receiver.Media.IdleReason
 		mediaSessionID := receiver.Media.MediaSessionID
+		currentTime, seekRevision := receiver.Media.CurrentTime, receiver.Media.seekRevision
 		var cid, ctype, streamType, title string
 		var duration float64
 		if receiver.Media.Media != nil {
@@ -54,6 +55,8 @@ func StartDashboard(receiver *Receiver, port int) (func(), error) {
 			"streamType":     streamType,
 			"duration":       duration,
 			"mediaSessionId": mediaSessionID,
+			"currentTime":    currentTime,
+			"seekRevision":   seekRevision,
 			"streamPath":     "/stream",
 			"title":          title,
 			"volume":         vol.Level,
@@ -66,6 +69,7 @@ func StartDashboard(receiver *Receiver, port int) (func(), error) {
 	mux.HandleFunc("/api/play", controlHandler(receiver, "PLAY"))
 	mux.HandleFunc("/api/pause", controlHandler(receiver, "PAUSE"))
 	mux.HandleFunc("/api/stop", controlHandler(receiver, "STOP"))
+	mux.HandleFunc("/api/seek", controlHandler(receiver, "SEEK"))
 	mux.HandleFunc("/stream", streamHandler(receiver))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -111,8 +115,23 @@ func controlHandler(receiver *Receiver, action string) http.HandlerFunc {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
+		var seek mediaRequest
+		if action == "SEEK" {
+			if err := json.NewDecoder(r.Body).Decode(&seek); err != nil || seek.CurrentTime == nil || seek.MediaSessionID == 0 {
+				http.Error(w, "currentTime and mediaSessionId required", http.StatusBadRequest)
+				return
+			}
+		}
 		receiver.Media.mu.Lock()
 		switch action {
+		case "SEEK":
+			if receiver.Media.Media == nil || seek.MediaSessionID != receiver.Media.MediaSessionID {
+				receiver.Media.mu.Unlock()
+				http.Error(w, "media session changed", http.StatusConflict)
+				return
+			}
+			receiver.Media.CurrentTime = clampMediaTime(*seek.CurrentTime, receiver.Media.Media)
+			receiver.Media.seekRevision++
 		case "PLAY":
 			receiver.Media.PlayerState = playerStatePlaying
 			receiver.Media.IdleReason = ""

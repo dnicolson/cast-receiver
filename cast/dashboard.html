@@ -165,6 +165,8 @@ const noticeEl = document.getElementById('notice');
 let activeSession = 0;
 let pendingAutoplaySession = 0;
 let lastSyncedPlaybackKey = '';
+let lastSeekKey = '', pendingSeek = null, receiverSeekTarget = null;
+let seekRequests = 0, statusGeneration = 0;
 
 function setNotice(text) {
   noticeEl.textContent = text;
@@ -193,6 +195,8 @@ function attachStream(status) {
     activeSession = 0;
     pendingAutoplaySession = 0;
     lastSyncedPlaybackKey = '';
+    lastSeekKey = '';
+    pendingSeek = receiverSeekTarget = null;
     player.removeAttribute('src');
     player.load();
     empty.textContent = 'No media loaded';
@@ -201,6 +205,7 @@ function attachStream(status) {
   }
   if (session === activeSession) return;
   activeSession = session;
+  pendingSeek = receiverSeekTarget = null;
   const state = String(status.playerState || '').toUpperCase();
   lastSyncedPlaybackKey = session + '|' + state;
   player.src = status.streamPath + '?session=' + encodeURIComponent(session);
@@ -271,10 +276,23 @@ function syncReceiverPlayback(status) {
   }
 }
 
+function applyPendingSeek() {
+  if (!pendingSeek || player.readyState < 1) return;
+  const { time, key } = pendingSeek;
+  if (Math.abs(player.currentTime - time) > 0.05) {
+    receiverSeekTarget = time;
+    player.currentTime = time;
+  }
+  lastSeekKey = key;
+  pendingSeek = null;
+}
+
 async function update() {
+  const generation = statusGeneration;
   try {
     const response = await fetch('/api/status', { cache: 'no-store' });
     const status = await response.json();
+    if (generation !== statusGeneration || seekRequests || player.seeking) return;
     setState(status.playerState);
     titleEl.textContent = status.title || 'Untitled';
     typeEl.textContent = [status.contentType, status.streamType].filter(Boolean).join(' / ') || '-';
@@ -283,6 +301,11 @@ async function update() {
     volumeEl.textContent = Math.round((status.volume || 0) * 100) + '%';
     sourceEl.textContent = status.contentId || '-';
     attachStream(status);
+    const seekKey = activeSession + '|' + status.seekRevision;
+    if (activeSession && seekKey !== lastSeekKey && Number.isFinite(status.currentTime)) {
+      pendingSeek = { time: status.currentTime, key: seekKey };
+      applyPendingSeek();
+    }
     syncReceiverPlayback(status);
   } catch (_) {
     setNotice('Receiver status is unavailable.');
@@ -294,6 +317,7 @@ player.addEventListener('error', () => {
   if (player.src) setNotice('The browser could not play this stream format.');
 });
 player.addEventListener('loadedmetadata', () => {
+  applyPendingSeek();
   attemptPendingAutoplay();
 });
 player.addEventListener('canplay', () => {
@@ -301,6 +325,27 @@ player.addEventListener('canplay', () => {
 });
 player.addEventListener('playing', () => {
   pendingAutoplaySession = 0;
+});
+player.addEventListener('seeked', async () => {
+  const time = player.currentTime;
+  const fromReceiver = receiverSeekTarget !== null && Math.abs(time - receiverSeekTarget) < 0.1;
+  receiverSeekTarget = null;
+  if (fromReceiver || !activeSession || !Number.isFinite(time)) return;
+  statusGeneration++;
+  seekRequests++;
+  try {
+    const response = await fetch('/api/seek', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mediaSessionId: activeSession, currentTime: time })
+    });
+    if (!response.ok) throw new Error('seek failed');
+  } catch (_) {
+    setNotice('Could not synchronize seek position.');
+  } finally {
+    seekRequests--;
+    update();
+  }
 });
 
 document.getElementById('btnPlay').addEventListener('click', async () => {

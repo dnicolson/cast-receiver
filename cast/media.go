@@ -27,6 +27,7 @@ const (
 // MediaSession tracks media playback state shared across all senders.
 type MediaSession struct {
 	mu                     sync.Mutex
+	seekRevision           uint64          // Distinguishes seeks from repeated dashboard polls.
 	MediaSessionID         int             `json:"mediaSessionId,omitempty"`
 	Media                  *MediaInfo      `json:"media,omitempty"`
 	PlayerState            string          `json:"playerState"`
@@ -211,6 +212,7 @@ func handleSeek(s *Session, src string, req *mediaRequest) {
 	r.Media.mu.Lock()
 	if req.CurrentTime != nil {
 		r.Media.CurrentTime = clampMediaTime(*req.CurrentTime, r.Media.Media)
+		r.Media.seekRevision++
 	}
 	switch req.ResumeState {
 	case "PLAYBACK_START":
